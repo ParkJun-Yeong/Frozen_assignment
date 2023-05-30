@@ -1,0 +1,5 @@
+defaults:
+  - audio_model: wav2vec2        # wav2vec2, wav2vec2_conformer, hubert
+  - language_model: opt                 # gpt2, opt
+  - train: default               # train set
+  - dataset: librispeech

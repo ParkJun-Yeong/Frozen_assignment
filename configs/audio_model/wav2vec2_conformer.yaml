@@ -1,0 +1,3 @@
+architecture: "wav2vec2_conformer"
+n_tokens: 4        # 실험변수
+hidden_dim: 1024

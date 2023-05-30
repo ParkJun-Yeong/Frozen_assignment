@@ -1,0 +1,6 @@
+dataset_path: "/mnt/hdd01_1tb/juny/"
+folder_in_archieve: "LibriSpeech"
+train_url: "train-clean-360"
+valid_url: "dev-clean"
+test_url: "test-clean"
+download: True

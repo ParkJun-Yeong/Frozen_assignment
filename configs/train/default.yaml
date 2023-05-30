@@ -1,0 +1,22 @@
+num_nodes: 1
+num_gpus: 1
+benchmark:
+metric: cer
+epochs: 100
+log_every_n_steps:
+resume: False
+amp: False
+checkpoint_path: "/mnt/hdd01_1tb/juny/frozentune_checkpoint"
+loss_fn: cross_entropy            # cross_entropy, ctc
+lr: 0.001
+warmup_exist: True
+warmup_lr: 1e-4
+warmup_epoch: 20
+momentum: 0.9
+optimizer: DadaptSGD
+train_batch: 2
+#minimum_lr: 1e-10
+lr_schedule_epoch: 10
+prompt: "Tell me what he said."
+#prompt: ""
+resume_from: "/mnt/hdd01_1tb/juny/frozentune_checkpoint/"

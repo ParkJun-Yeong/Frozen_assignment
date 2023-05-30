@@ -1,0 +1,6 @@
+architecture: "hubert"
+n_tokens: 1        # 실험변수
+hidden_dim: 1024
+down_sample:
+  method: "cnn"          # "lstm"(reduce_factor x), cnn(requires reduce_factor)
+  reduce_factor: 12
