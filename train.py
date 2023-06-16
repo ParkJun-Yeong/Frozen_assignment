@@ -21,7 +21,7 @@ from datetime import datetime
 
 # CURRENT_DIR = os.path.dirname(__file__)
 # sys.path.append(os.path.join(CURRENT_DIR, "/"))
-from Frozen.FrozenTone import FrozenTone
+from FrozenTune.FrozenTone import FrozenTone
 from dataset.librispeech.librispeech import LibriSpeech, collate_fn
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
@@ -63,8 +63,9 @@ def train(model, optimizer, train_dataloader, valid_dataloader, loss_fn, epochs,
         # if ((optimizer.param_groups[0]["lr"] >= cfg.train.minimum_lr) & (epoch % cfg.train.lr_schedule_epoch == 0) & (epoch != 1)) | (epoch == 6):         # minimum
         # if (epoch % cfg.train.lr_schedule_epoch == 0) & (epoch != 0):  # minimum
         #     lr_scheduler.step()
-        if epoch == cfg.train.warmup_epoch:
-            optimizer.param_groups[0]["lr"] = 1
+        if cfg.train.warmup_exist & (cfg.train.optimizer != "DadaptSGD"):
+            if epoch == cfg.train.warmup_epoch:
+                optimizer.param_groups[0]["lr"] = cfg.train.lr
 
 
         print(f"********* epoch {epoch} *********")
@@ -103,11 +104,13 @@ def train(model, optimizer, train_dataloader, valid_dataloader, loss_fn, epochs,
                         target_lengths = torch.tensor(lengths)
                         loss = loss_fn(output.to(A100), y_ids.to(CPU), input_lengths.to(A100), target_lengths.to(CPU))
 
+                        generated_text = generate(model, X, y_ids)
+
                 loss_hist.append(loss.item())
 
                 scaler = torch.cuda.amp.GradScaler()
                 optimizer.zero_grad()
-                scaler.scale(loss).backward()
+                # scaler.scale(loss).backward()
                 # optimizer.step()
                 scaler.step(optimizer)
                 scaler.update()
@@ -145,13 +148,18 @@ def train(model, optimizer, train_dataloader, valid_dataloader, loss_fn, epochs,
 
                 optimizer.zero_grad()
                 loss.backward()
+                # Add gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5)
                 optimizer.step()
 
 
             wandb.log({"train lr": optimizer.param_groups[0]["lr"]})
 
-            decoded_strs = decode_to_string(cfg.language_model.architecture, output)
-            decoded_strs = [s.upper() for s in decoded_strs]
+            decoded_strs = generate(model, X, y_ids)
+            # decoded_strs = decode_to_string(cfg.language_model.architecture, output)
+            # # decoded_strs = [s.upper() for s in decoded_strs]
+            # decoded_strs = [s.lower() for s in decoded_strs]
+
 
             print("-- decoded string in this iteration --")
             for i, s in zip(y, decoded_strs):
@@ -278,6 +286,72 @@ def valid(model, valid_dataloader, loss_fn, CER, lm_model, pad_token_id, loss_ty
 
         # calculate_cer()
 
+def generate(model, X, y_ids):
+    prompt = "what did the speaker say?"
+    max_length = 100
+    output_ids = torch.LongTensor([]).view(max_length, 0).to(A100)
+    top_k=50
+    top_p=0.95
+
+    model.eval()
+
+    with torch.no_grad():
+        audio_prefix = model.audio_encoder(X.to(CPU), sampling_rate=16000)
+
+        for i in range(max_length):
+            if i == 0:
+                logits, _ = model.language_decoder(audio_prefix.to(A100), output_ids,
+                                                   prompt, infer=False, n_tokens=8)
+            else:
+                logits, _ = model.language_decoder(torch.empty(()), output_ids,
+                                                   "", infer=False, n_tokens=8)
+            logits = logits[:,-1,:]
+            logits = top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p)
+            # next_token = torch.argmax(next_token_logit, dim=-1)
+            probabilities = torch.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probabilities, num_samples=1)
+            output_ids = torch.cat((output_ids, next_token), dim=1)
+
+             # = torch.cat([model_inputs["inputs_embeds"], self.get_input_embeddings()(next_token)], dim=1)
+            # model_inputs["attention_mask"] = torch.cat([model_inputs["attention_mask"], torch.ones((model_inputs["attention_mask"].size(0), 1)).to(model_inputs["attention_mask"])], dim=1)
+
+
+    return output_ids
+
+from transformers.generation.logits_process import (TopKLogitsWarper, TopPLogitsWarper)
+def top_k_top_p_filtering(
+    logits: torch.FloatTensor,
+    top_k: int = 0,
+    top_p: float = 1.0,
+    filter_value: float = -float("Inf"),
+    min_tokens_to_keep: int = 1,
+) -> torch.FloatTensor:
+    """
+    Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
+
+    Args:
+        logits: logits distribution shape (batch size, vocabulary size)
+        top_k (`int`, *optional*, defaults to 0):
+            If > 0, only keep the top k tokens with highest probability (top-k filtering)
+        top_p (`float`, *optional*, defaults to 1.0):
+            If < 1.0, only keep the top tokens with cumulative probability >= top_p (nucleus filtering). Nucleus
+            filtering is described in Holtzman et al. (http://arxiv.org/abs/1904.09751)
+        min_tokens_to_keep (`int`, *optional*, defaults to 1):
+            Minimumber of tokens we keep per batch example in the output.
+
+    From: https://gist.github.com/thomwolf/1a5a29f6962089e871b94cbd09daf317
+    """
+    if top_k > 0:
+        logits = TopKLogitsWarper(top_k=top_k, filter_value=filter_value, min_tokens_to_keep=min_tokens_to_keep)(
+            None, logits
+        )
+
+    if 0 <= top_p <= 1.0:
+        logits = TopPLogitsWarper(top_p=top_p, filter_value=filter_value, min_tokens_to_keep=min_tokens_to_keep)(
+            None, logits
+        )
+
+    return logits
 
 def decode_to_string(lm_model, y_hat):
     decoded_strs = list()
@@ -313,7 +387,7 @@ def get_pad_token_id(lm_model, size):
         return pad_token_id
 
 
-@hydra.main(config_path=config_path, version_base=None, config_name="default")
+@hydra.main(config_path=config_path, config_name="default")
 def main(cfg: DictConfig):
     warnings.filterwarnings("ignore")
     # cfg = OmegaConf.load(cfg)
@@ -340,7 +414,7 @@ def main(cfg: DictConfig):
     if cfg.train.resume:
         lr_init = cfg.train.lr ** 0.25
     else:
-        if cfg.warmup_exist:
+        if cfg.train.warmup_exist:
             lr_init = cfg.train.warmup_lr
         else:
             lr_init = cfg.train.lr
@@ -352,7 +426,7 @@ def main(cfg: DictConfig):
     if cfg.train.optimizer == "Adam":
         optimizer = Adam(model.parameters(), lr=lr_init)
     if cfg.train.optimizer == "DadaptSGD":
-        optimizer = DAdaptSGD(model.parameters(), lr=lr_init, growth_rate=1.04)
+        optimizer = DAdaptSGD(model.parameters(), lr=1.0, growth_rate=1.04)             # optimizer, growth_rate, warmup 셋 중 하나만 쓰면 됨
 
     if cfg.train.resume:
         optimizer.load_state_dict(resume_data["optimizer_state_dict"])
@@ -375,7 +449,7 @@ def main(cfg: DictConfig):
 
 
     lambda1 = lambda epoch: 0.25 ** epoch
-    # lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda1)
+    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda1)
 
     pad_token_id = get_pad_token_id(cfg.language_model.architecture, cfg.language_model.size)
     # loss_fn = nn.CrossEntropyLoss(ignore_index=pad_token_id)
